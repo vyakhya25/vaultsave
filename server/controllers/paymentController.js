@@ -10,7 +10,7 @@ const Payment = require("../models/Payment");
 const getRazorpay = () => {
   if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
     throw new Error(
-      "Razorpay keys missing! Add them to server/.env"
+      "Razorpay keys are missing! Add RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET to your server/.env file. Get keys from Razorpay Dashboard → Settings → API Keys"
     );
   }
 
