@@ -1,16 +1,19 @@
-const Razorpay = require('razorpay');
-const crypto = require('crypto');
-const User = require('../models/User');
-const Transaction = require('../models/Transaction');
-const Payment = require('../models/Payment');
+const Razorpay = require("razorpay");
+const crypto = require("crypto");
+const axios = require("axios");
 
-// Initialize Razorpay lazily (after dotenv has loaded)
+const User = require("../models/User");
+const Transaction = require("../models/Transaction");
+const Payment = require("../models/Payment");
+
+// Initialize Razorpay
 const getRazorpay = () => {
   if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
     throw new Error(
-      'Razorpay keys are missing! Add RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET to your server/.env file. Get keys from https://dashboard.razorpay.com → Settings → API Keys'
+      "Razorpay keys missing! Add them to server/.env"
     );
   }
+
   return new Razorpay({
     key_id: process.env.RAZORPAY_KEY_ID,
     key_secret: process.env.RAZORPAY_KEY_SECRET,
@@ -18,49 +21,69 @@ const getRazorpay = () => {
 };
 
 // ─────────────────────────────────────────────
-// @desc    Create Razorpay order (for depositing money)
-// @route   POST /api/payment/create-order
+// Create Razorpay Order
 // ─────────────────────────────────────────────
 const createOrder = async (req, res) => {
   try {
+    console.log("Create order request:", req.body);
+
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: "User not authenticated",
+      });
+    }
+
     const { amount } = req.body;
 
-    if (!amount || amount <= 0) {
-      return res.status(400).json({ message: 'Please enter a valid amount' });
-    }
-    if (amount < 1) {
-      return res.status(400).json({ message: 'Minimum deposit is ₹1' });
-    }
-    if (amount > 500000) {
-      return res.status(400).json({ message: 'Maximum deposit is ₹5,00,000 per transaction' });
+    const parsedAmount = Number(amount);
+
+    if (!parsedAmount || parsedAmount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Please enter a valid amount",
+      });
     }
 
-    // Get Razorpay instance (will throw clear error if keys missing)
+    if (parsedAmount < 1) {
+      return res.status(400).json({
+        success: false,
+        message: "Minimum deposit is ₹1",
+      });
+    }
+
+    if (parsedAmount > 500000) {
+      return res.status(400).json({
+        success: false,
+        message: "Maximum deposit is ₹5,00,000",
+      });
+    }
+
     const razorpay = getRazorpay();
 
-    const options = {
-      amount: Math.round(amount * 100), // paise
-      currency: 'INR',
-      receipt: `rcpt_${req.user._id}_${Date.now()}`,
-      notes: {
-        userId: req.user._id.toString(),
-        userEmail: req.user.email,
-        purpose: 'VaultSave Wallet Deposit',
-      },
-    };
+  const options = {
+  amount: Math.round(parsedAmount * 100),
+  currency: "INR",
+  receipt: `r_${req.user._id.toString().slice(-6)}_${Date.now()}`,
+  notes: {
+    userId: req.user._id.toString(),
+    userEmail: req.user.email,
+    purpose: "VaultSave Wallet Deposit",
+  },
+};
 
     const order = await razorpay.orders.create(options);
 
-    // Save pending payment record
     await Payment.create({
       user: req.user._id,
       razorpayOrderId: order.id,
-      amount,
-      status: 'PENDING',
-      type: 'DEPOSIT',
+      amount: parsedAmount,
+      status: "PENDING",
+      type: "DEPOSIT",
     });
 
     res.json({
+      success: true,
       orderId: order.id,
       amount: order.amount,
       currency: order.currency,
@@ -69,74 +92,90 @@ const createOrder = async (req, res) => {
       userEmail: req.user.email,
     });
   } catch (error) {
-    console.error('❌ Razorpay createOrder error:', error.message);
-    res.status(500).json({ message: 'Failed to create payment order: ' + error.message });
+    console.error("❌ Razorpay createOrder error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to create payment order",
+    });
   }
 };
 
 // ─────────────────────────────────────────────
-// @desc    Verify Razorpay payment & credit wallet
-// @route   POST /api/payment/verify
+// Verify Payment
 // ─────────────────────────────────────────────
 const verifyPayment = async (req, res) => {
   try {
-    const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
+    const {
+      razorpay_order_id,
+      razorpay_payment_id,
+      razorpay_signature,
+    } = req.body;
 
     if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
-      return res.status(400).json({ message: 'Missing payment verification data' });
+      return res.status(400).json({
+        success: false,
+        message: "Missing payment verification data",
+      });
     }
 
-    if (!process.env.RAZORPAY_KEY_SECRET) {
-      return res.status(500).json({ message: 'Razorpay secret key not configured on server' });
-    }
+    const body = razorpay_order_id + "|" + razorpay_payment_id;
 
-    // Verify signature
-    const body = razorpay_order_id + '|' + razorpay_payment_id;
     const expectedSignature = crypto
-      .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
+      .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
       .update(body)
-      .digest('hex');
+      .digest("hex");
 
     if (expectedSignature !== razorpay_signature) {
       await Payment.findOneAndUpdate(
         { razorpayOrderId: razorpay_order_id },
-        { status: 'FAILED' }
+        { status: "FAILED" }
       );
-      return res.status(400).json({ message: 'Payment verification failed. Invalid signature.' });
+
+      return res.status(400).json({
+        success: false,
+        message: "Payment verification failed",
+      });
     }
 
-    // Find the pending payment
-    const payment = await Payment.findOne({ razorpayOrderId: razorpay_order_id });
+    const payment = await Payment.findOne({
+      razorpayOrderId: razorpay_order_id,
+    });
+
     if (!payment) {
-      return res.status(404).json({ message: 'Payment record not found' });
-    }
-    if (payment.status === 'SUCCESS') {
-      return res.status(400).json({ message: 'Payment already processed' });
+      return res.status(404).json({
+        success: false,
+        message: "Payment record not found",
+      });
     }
 
-    // Credit user wallet
+    if (payment.status === "SUCCESS") {
+      return res.status(400).json({
+        success: false,
+        message: "Payment already processed",
+      });
+    }
+
     const user = await User.findByIdAndUpdate(
       req.user._id,
       { $inc: { walletBalance: payment.amount } },
       { new: true }
     );
 
-    // Update payment record
     await Payment.findOneAndUpdate(
       { razorpayOrderId: razorpay_order_id },
       {
-        status: 'SUCCESS',
+        status: "SUCCESS",
         razorpayPaymentId: razorpay_payment_id,
         razorpaySignature: razorpay_signature,
       }
     );
 
-    // Record transaction
     await Transaction.create({
       user: req.user._id,
-      type: 'CREDIT',
+      type: "CREDIT",
       amount: payment.amount,
-      description: `Deposited ₹${payment.amount} via UPI/GPay (Razorpay)`,
+      description: `Deposited ₹${payment.amount} via Razorpay`,
       paymentRef: razorpay_payment_id,
       balanceAfter: user.walletBalance,
     });
@@ -144,128 +183,144 @@ const verifyPayment = async (req, res) => {
     res.json({
       success: true,
       walletBalance: user.walletBalance,
-      message: `₹${payment.amount} successfully added to your wallet!`,
-      paymentId: razorpay_payment_id,
+      message: `₹${payment.amount} added to wallet`,
     });
   } catch (error) {
-    console.error('❌ Payment verify error:', error.message);
-    res.status(500).json({ message: 'Payment verification failed: ' + error.message });
+    console.error("❌ Payment verify error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: error.message || "Payment verification failed",
+    });
   }
 };
 
 // ─────────────────────────────────────────────
-// @desc    Payout to bank (vault withdrawal → bank)
-// @route   POST /api/payment/payout
+// Payout
 // ─────────────────────────────────────────────
 const createPayout = async (req, res) => {
   try {
-    const { accountNumber, ifscCode, accountHolderName, amount, vaultId } = req.body;
+    const { accountNumber, ifscCode, accountHolderName, amount } = req.body;
 
     if (!accountNumber || !ifscCode || !accountHolderName || !amount) {
-      return res.status(400).json({ message: 'Please provide all bank account details' });
-    }
-
-    const isTestMode = process.env.RAZORPAY_KEY_ID?.startsWith('rzp_test_');
-
-    if (isTestMode) {
-      // Simulate payout in test mode
-      return res.json({
-        success: true,
-        payoutId: `pout_test_${Date.now()}`,
-        status: 'processing',
-        message: `TEST MODE: ₹${amount} payout initiated to ${accountHolderName}'s account ending ****${accountNumber.slice(-4)}. In live mode, funds arrive within 30 minutes via IMPS.`,
-        isTestMode: true,
+      return res.status(400).json({
+        success: false,
+        message: "Provide all bank details",
       });
     }
 
-    // Live mode: actual Razorpay Payouts API
-    const axios = require('axios');
+    const isTestMode =
+      process.env.RAZORPAY_KEY_ID &&
+      process.env.RAZORPAY_KEY_ID.startsWith("rzp_test_");
+
+    if (isTestMode) {
+      return res.json({
+        success: true,
+        payoutId: `test_${Date.now()}`,
+        status: "processing",
+        message: `TEST MODE payout ₹${amount}`,
+      });
+    }
+
     const auth = Buffer.from(
       `${process.env.RAZORPAY_KEY_ID}:${process.env.RAZORPAY_KEY_SECRET}`
-    ).toString('base64');
+    ).toString("base64");
 
     const payoutData = {
       account_number: process.env.RAZORPAY_ACCOUNT_NUMBER,
+      amount: Math.round(amount * 100),
+      currency: "INR",
+      mode: "IMPS",
+      purpose: "payout",
       fund_account: {
-        account_type: 'bank_account',
+        account_type: "bank_account",
         bank_account: {
           name: accountHolderName,
           ifsc: ifscCode,
           account_number: accountNumber,
         },
-        contact: {
-          name: req.user.name,
-          email: req.user.email,
-          type: 'customer',
-        },
-      },
-      amount: Math.round(amount * 100),
-      currency: 'INR',
-      mode: 'IMPS',
-      purpose: 'payout',
-      queue_if_low_balance: false,
-      notes: {
-        userId: req.user._id.toString(),
-        vaultId: vaultId || '',
       },
     };
 
-    const response = await axios.post('https://api.razorpay.com/v1/payouts', payoutData, {
-      headers: {
-        Authorization: `Basic ${auth}`,
-        'Content-Type': 'application/json',
-        'X-Payout-Idempotency': `vault_${vaultId}_${Date.now()}`,
-      },
-    });
+    const response = await axios.post(
+      "https://api.razorpay.com/v1/payouts",
+      payoutData,
+      {
+        headers: {
+          Authorization: `Basic ${auth}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
 
     res.json({
       success: true,
       payoutId: response.data.id,
       status: response.data.status,
-      message: `₹${amount} payout initiated! Funds arrive in your bank within 30 minutes via IMPS.`,
     });
   } catch (error) {
-    console.error('❌ Payout error:', error?.response?.data || error.message);
+    console.error("❌ Payout error:", error.response?.data || error);
+
     res.status(500).json({
-      message: error?.response?.data?.error?.description || 'Payout failed: ' + error.message,
+      success: false,
+      message:
+        error.response?.data?.error?.description ||
+        error.message ||
+        "Payout failed",
     });
   }
 };
 
 // ─────────────────────────────────────────────
-// @desc    Razorpay webhook
-// @route   POST /api/payment/webhook
+// Webhook
 // ─────────────────────────────────────────────
 const handleWebhook = async (req, res) => {
   try {
     const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
-    const signature = req.headers['x-razorpay-signature'];
+    const signature = req.headers["x-razorpay-signature"];
 
     if (webhookSecret && signature) {
       const expectedSig = crypto
-        .createHmac('sha256', webhookSecret)
+        .createHmac("sha256", webhookSecret)
         .update(JSON.stringify(req.body))
-        .digest('hex');
+        .digest("hex");
+
       if (expectedSig !== signature) {
-        return res.status(400).json({ message: 'Invalid webhook signature' });
+        return res.status(400).json({ message: "Invalid webhook signature" });
       }
     }
 
-    const event = req.body.event;
-    console.log(`📩 Razorpay webhook: ${event}`);
+    console.log("Webhook event:", req.body.event);
+
     res.json({ received: true });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    console.error("Webhook error:", error);
+
+    res.status(500).json({
+      message: error.message || "Webhook error",
+    });
   }
 };
 
-// @desc    Get Razorpay key for frontend
-// @route   GET /api/payment/key
+// ─────────────────────────────────────────────
+// Get Razorpay key
+// ─────────────────────────────────────────────
 const getKey = async (req, res) => {
   if (!process.env.RAZORPAY_KEY_ID) {
-    return res.status(500).json({ message: 'Razorpay key not configured' });
+    return res.status(500).json({
+      message: "Razorpay key not configured",
+    });
   }
-  res.json({ keyId: process.env.RAZORPAY_KEY_ID });
+
+  res.json({
+    keyId: process.env.RAZORPAY_KEY_ID,
+  });
 };
 
-module.exports = { createOrder, verifyPayment, createPayout, handleWebhook, getKey };
+module.exports = {
+  createOrder,
+  verifyPayment,
+  createPayout,
+  handleWebhook,
+  getKey,
+};
