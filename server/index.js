@@ -33,7 +33,10 @@ console.log('──────────────────────�
 
 const app = express();
 
-app.use(cors());
+app.use(cors({
+  origin: process.env.CLIENT_URL || 'https://vaultsave.vercel.app',
+  credentials: true,
+}));
 app.use(express.json());
 
 
